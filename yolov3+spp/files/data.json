@@ -1,0 +1,1 @@
+{"train_path": "../train_file.txt", "val_path": "../val_file.txt", "classes": "../files/classes.txt"}
