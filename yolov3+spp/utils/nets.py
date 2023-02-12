@@ -66,9 +66,6 @@ class ResBlock(nn.Module):
     
 
 
-
-
-
 class Darknet(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -189,37 +186,82 @@ class YoloHead(nn.Module):
 class YoLoBody(nn.Module):
     def __init__(self, num_cclasses, num_anchor=3) -> None:
         super().__init__()
-
+        anchors = [[(10,13),  (16,30),  (33,23)],  [(30,61),  (62,45),  (59,119)],  [(116,90),  (156,198), (373,326)]]
         self.darknet = Darknet()
 
         self.out_13 = YoloHead(1024, (num_cclasses+1+4)*num_anchor)
         self.out_26 = YoloHead(512, (num_cclasses+1+4)*num_anchor)
         self.out_52 = YoloHead(256, (num_cclasses+1+4)*num_anchor)
+        self. yololayer = [
+            YoLoLayer(anchors[-1], 20, 416, 32),
+            YoLoLayer(anchors[-2], 20, 416, 16),
+            YoLoLayer(anchors[0], 20, 416, 8)
+            ]  
+        # self.yolo_out13 = 
+        # self.yolo_out26 = 
+        # self.yolo_out52 = 
+
 
     def forward(self, x):
         out13, out26, out52 = self.darknet(x)
-        return self.out_13(out13), self.out_26(out26), self.out_52(out52)
+        return self.yololayer[0](self.out_13(out13)), self.yololayer[1](self.out_26(out26)), self.yololayer[2](self.out_52(out52))
 
 
 class YoLoLayer(nn.Module):
+    """针对某一层的"""
     def __init__(self, anchors, num_classes, img_size, stride) -> None:
         super().__init__()
-        self.anchors = torch.Tensor(anchors) # ((), (), ...) # 9个
+        # 10,13,  16,30,  33,23,  30,61,  62,45,  59,119,  116,90,  156,198,  373,326
+        self.anchors = torch.Tensor(anchors) # ((), (), ...) # 3个, 就一层. shape:(3, 2)
         self.stride = stride # 特征图上对应原图的缩放比例。
-        self.num_anchors = len(anchors)
-        self.num_output = num_classes + 1 + 4 # (tx, ty, tw, th, score...)
+        self.num_anchors = len(anchors) # anchors数目.
+        self.num_classes = num_classes
+        self.img_size = img_size
+        self.num_output = self.num_classes + 1 + 4 # (tx, ty, tw, th, score...) # 维度.
 
         # 初始化. 
         self.nx, self.ny, self.ng = 0, 0, (0, 0)  # initialize number of x, y gridpoints # 预测特征层初始化.
-        
+
         # 缩放到不同尺度上.
         self.anchor_vec = self.anchors / self.stride # 将anchors缩放到不同预测特征层上的尺度 (3, 2) # 
-        #
+
         self.anchor_wh = self.anchor_vec.reshape(1, self.num_anchors, 1, 1, 2) # 调整我们的视图
         self.grid = None
+
+
+    def create_grids(self, ng=(13, 13), device="cpu"):
+        """
+        更新grids信息并生成新的grids参数
+        针对有效特征层. 生成新的grids参数.
+        :param ng: 特征图大小
+        :param device:
+        :return:
+        """
+        self.nx, self.ny = ng # 网格尺寸. nx是x方向上网格数量, ny是y方向上网格数量. 
+        self.ng = torch.tensor(ng, dtype=torch.float) 
+
+        # build xy offsets 构建每个cell处的anchor的xy偏移量(在feature map上的)
+        # 训练模式跳过这个过程, 训练模式不需要回归到最终预测boxes 
+        if not self.training:  # 如果不是训练模模型, 我们需要进行偏移量. 训练的时候只需要计算损失, 无需计算.
+            yv, xv = torch.meshgrid([torch.arange(self.ny, device=device), # 通过meshgrid来得到每个grid的左上角坐标的x, y值
+                                     torch.arange(self.nx, device=device)]) # 生成grid.
+            # yv就是网格左上角的y坐标, xv就是左上角的x坐标. 
+            # 然后通过stack进行拼接. 然后调整视图. 
+            # batch_size, na, grid_h, grid_w, wh
+            self.grid = torch.stack((xv, yv), 2).view((1, 1, self.ny, self.nx, 2)).float()
+
+        if self.anchor_vec.device != device:
+            self.anchor_vec = self.anchor_vec.to(device)
+            self.anchor_wh = self.anchor_wh.to(device)
+
+    def forward(self, pred_layer):
+        bs, _, ny, nx = pred_layer.shape # batch, (1+4+nc)*3, grid, grid.
+        # torch.Size([1, 75, 13, 13]) torch.Size([1, 75, 26, 26]) torch.Size([1, 75, 52, 52])
+        if (self.nx, self.ny) != (nx, ny) or self.grid is None:  # fix no grid bug, 是否等于当前的nx,ny
+            self.create_grids((nx, ny), pred_layer.device) # 生成grid.
         
-
-
+        pred_layer = pred_layer.view(bs, self.num_anchors, self.num_output, self.ny, self.nx).permute(0, 1, 3, 4, 2).contiguous()
+        return pred_layer # torch.Size([1, 3, 13, 13, 25]) # 视角变成, batch, 然后有三个框, 每个框, 要看13*13个网格, 每个网格要预测出来25个参数.
 
 def test_darknet() -> None:
     x = torch.zeros(size=(1, 3, 416, 416))
@@ -233,5 +275,25 @@ def test_yolobody():
     out13, out26, out52 = yolo(x) 
     print(out13.shape, out26.shape, out52.shape)
 
+def test_yololayer():
+    anchors = [[116,90],  [156,198],  [373,326]]
+    x = torch.zeros(size=(1, 3, 416, 416))
+    yolo = YoLoBody(20)
+    out13, out26, out52 = yolo(x) 
+    print(out13.shape, out26.shape, out52.shape)
+
+    yololayer = YoLoLayer(anchors, 20, 416, 32)
+    result = yololayer(out13)
+    print(result.shape)
+
+def test_yolo_framework():
+    x = torch.zeros(size=(1, 3, 416, 416))
+    yolo = YoLoBody(20)
+    out13, out26, out52 = yolo(x) 
+    print(out13.shape, out26.shape, out52.shape)
+    print(yolo.yololayer)
+
 if __name__ == "__main__":
-    test_yolobody()
+    # test_yolobody()
+    # test_yololayer()
+    test_yolo_framework()

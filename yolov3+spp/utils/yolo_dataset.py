@@ -124,7 +124,7 @@ class Yolo_VOC_dataset(Dataset):
 
 
 
-            return self.transforme(cv_img), torch.from_numpy(np.hstack([np.full(shape=(label.shape[0], 1), fill_value=index), label])), xml_dict["shape"], index
+            return self.transforme(cv_img), torch.from_numpy(np.hstack([np.zeros(shape=(label.shape[0], 1)), label])), xml_dict["shape"], index
             
             
 
@@ -151,8 +151,8 @@ class Yolo_VOC_dataset(Dataset):
     @staticmethod
     def collate_fn(batch):
         img, label, shapes, index = zip(*batch)  # transposed
-        # for i, l in enumerate(label): # 这一步实际上就是在最前面加上属于那张图片. 我在dataset中做了.
-        #     l[:, 0] = i  # add target image index for build_targets()
+        for i, l in enumerate(label): # 这一步实际上就是在最前面加上属于那张图片. 我在dataset中做了.
+            l[:, 0] = i  # add target image index for build_targets()
         return torch.stack(img, 0), torch.cat(label, 0), shapes, index
     
 
@@ -254,7 +254,7 @@ def test_parse_xml():
 def draw_relavive_img(image, xywh, shapes):
     image = image.transpose(1, 2, 0) * 255
     image = image.astype(np.uint8).copy()
-    # print(image)
+
     h, w = image.shape[: 2]
     print(h, w)
     xywh = xywh[:, 1:]
@@ -272,7 +272,7 @@ def draw_relavive_img(image, xywh, shapes):
 
     print("xywh", xywh)
     for line in xywh:
-        line = line.astype(np.uint16).copy()
+        line = line.astype(np.uint16).copy() # 这里又可能会出现截断现象。 
         print(line[2], line[4])
         print("line[2]+line[4]", line[2]+line[4])
         print((line[1], line[2]), (line[1]+line[3], line[2]+line[4]))
