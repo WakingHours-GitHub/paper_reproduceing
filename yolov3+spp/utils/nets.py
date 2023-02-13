@@ -287,8 +287,9 @@ def test_yololayer():
     print(result.shape)
 
 def test_yolo_framework():
-    x = torch.zeros(size=(1, 3, 416, 416))
-    yolo = YoLoBody(20)
+    device = torch.device("cuda:0")
+    x = torch.zeros(size=(1, 3, 416, 416)).to(device)
+    yolo = YoLoBody(20).to(device)
     out13, out26, out52 = yolo(x) 
     print(out13.shape, out26.shape, out52.shape)
     print(yolo.yololayer)

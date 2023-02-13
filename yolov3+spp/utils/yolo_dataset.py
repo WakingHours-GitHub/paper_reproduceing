@@ -12,6 +12,11 @@ import torchvision
 from torchvision import transforms
 import matplotlib.pyplot as plt
 
+
+from utils import xywh2xyxy, xyxy2xywh
+
+
+
 join = lambda *args: os.path.join(*args)
 runtime_path = str(Path(sys.path[0]))
 print("Project run on:", runtime_path)
@@ -109,13 +114,14 @@ class Yolo_VOC_dataset(Dataset):
             print("xyxy", label)
 
             if label.ndim > 0:
-                label[:, 3] = label[:, 3] - label[:, 1]
-                label[:, 4] = label[:, 4] - label[:, 2]
+
+                label[:, 3] = label[:, 3] - label[:, 1] # w
+                label[:, 4] = label[:, 4] - label[:, 2] # h
                 print("xywh", label)
 
 
-                label[:, 1] = (label[:, 1]/float(w0)).astype(np.float32)
-                label[:, 2] = (label[:, 2]/float(h0)).astype(np.float32)
+                label[:, 1] = ((label[:, 1]+label[:, 3]/2.0)/float(w0)).astype(np.float32)
+                label[:, 2] = ((label[:, 2]+label[:, 4]/2.0)/float(h0)).astype(np.float32)
                 label[:, 3] = (label[:, 3]/float(w0)).astype(np.float32)
                 label[:, 4] = (label[:, 4]/float(h0)).astype(np.float32)
 
@@ -298,16 +304,37 @@ def test_dataset():
 
 
     img, label, shape0, index = yolo_dataset[-203]
+    # img, label, shape0, index = yolo_dataset[0]
+    
     print(img.shape)
     h0, w0 = shape0
     print(h0, w0)
-    label = label[:, 1:]
+    label = label[:, 1:] 
+    y = xywh2xyxy(label[:, :1:])
+    y[: 0] = y[:, 0]*w0
+    y[: 1] = y[:, 1]*h0
+    y[: 2] = y[:, 2]*w0
+    y[: 3] = y[:, 3]*h0
+
+
+    print("y", y)
+
+
+
+    print(label)
+
     label[:, 1] = (label[:, 1]*float(w0))
     label[:, 2] = (label[:, 2]*float(h0))
     label[:, 3] = (label[:, 3]*float(w0))
     label[:, 4] = (label[:, 4]*float(h0))
+
+    label[:, 1] = (label[:, 1]-label[:, 3]/2)
+    label[:, 2] = (label[:, 2]-label[:, 4]/2)
+
+
+
     label = np.ceil(label.numpy().copy())
-    print(label)    
+    print(label.astype(np.uint32))    
 
 def test_dataloader():
     yolo_dataset = Yolo_VOC_dataset()
@@ -334,10 +361,11 @@ def test_draw():
 
 
 if __name__ == "__main__":
+    test_parse_xml()
     test_dataset()
     # test_dataloader()
     
-    test_draw()
+    # test_draw()
 
 
 
