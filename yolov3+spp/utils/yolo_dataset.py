@@ -13,7 +13,7 @@ from torchvision import transforms
 import matplotlib.pyplot as plt
 
 
-from utils import xywh2xyxy, xyxy2xywh
+# from utils import xywh2xyxy, xyxy2xywh
 
 
 
@@ -257,6 +257,9 @@ def test_parse_xml():
     print(parse_xml(s))
 
 
+
+
+
 def draw_relavive_img(image, xywh, shapes):
     image = image.transpose(1, 2, 0) * 255
     image = image.astype(np.uint8).copy()
@@ -284,17 +287,19 @@ def draw_relavive_img(image, xywh, shapes):
         print((line[1], line[2]), (line[1]+line[3], line[2]+line[4]))
         cv.rectangle(image, (line[1], line[2]), (line[1]+line[3], line[2]+line[4]), color=(255, 0, 0), thickness=1, )
 
-
-
-
-
-
-
-
     plt.imshow(image)
     plt.savefig("./test_draw.jpg")
     plt.show()
     
+def draw_relavive_xywh(image, xywh):
+    image = image.transpose(1, 2, 0) * 255
+    image = image.astype(np.uint8).copy()
+    print(image)
+
+
+
+
+
 
 
 
@@ -310,11 +315,15 @@ def test_dataset():
     h0, w0 = shape0
     print(h0, w0)
     label = label[:, 1:] 
-    y = xywh2xyxy(label[:, :1:])
-    y[: 0] = y[:, 0]*w0
-    y[: 1] = y[:, 1]*h0
-    y[: 2] = y[:, 2]*w0
-    y[: 3] = y[:, 3]*h0
+    print("label[:, 1:]", label[:, 1:])
+    y = label[:, 1:]
+    # 在进行转换之前, 必须保证是绝对坐标. 
+    y[:, 0] = y[:, 0]*w0
+    y[:, 1] = y[:, 1]*h0
+    y[:, 2] = y[:, 2]*w0
+    y[:, 3] = y[:, 3]*h0
+    y = xywh2xyxy(y)
+
 
 
     print("y", y)

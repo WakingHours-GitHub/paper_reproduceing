@@ -25,7 +25,7 @@ def build_targets(pred, targets, model):
     """
 
     num_targets = targets.shape[0]
-    tcls, tbox, indices, av = [], [], [], [] # 初始化. 
+    tcls, tbox, indices, anch = [], [], [], [] # 初始化. 
     gain = torch.ones(6, device=targets.device).long()  # normalized to gridspace gain, 针对每一个目标的增益.
 
     # multi_gpu = type(model) in (nn.parallel.DataParallel,
@@ -56,32 +56,68 @@ def build_targets(pred, targets, model):
             
             # 然后通过这个逻辑矩阵, 分别找到对应的a, 以及对应的target, 同一索引(位置上)相对应, 也就是这个target对应的anchor模板.
             a,t = anthor_target[j], t.repeat(na, 1, 1)[j]
+            print(t)
 
         
         # 然后还需要知道target要对应到哪一个grid cell上. 知道位置, 
         # 分别解析: 
         b, c = t[:, :2].long().T # image_idx, classes # 转置, 两行, n列.
         g_x_y = t[:, 2:4] # 获取中心坐标
+        g_w_h = t[:, 4: 6] # 获取所有目标框的wh.
+        g_i_j = g_x_y.long() # gt的中心坐标。向下取整, 就是左上角边界框的坐标. 
+
+        gi, gj = g_i_j.T # 同样, 转置, 一行代表x坐标, 一行代表j坐标. 
+
+        # 遍历一层, 将一层的信息添加进去. 
+        # .clamp()就是限制在上下界. 
+        indices.append((b, a, gj.clamp_(0, gain[3]-1), gi.clamp_(0, gain[2]-1)))
+        # b: 那张图片?
+        # a: 所有正样本对应的anchor模板是几号.
+        # gj: 对应anchor中心点的y坐标 然后限制到[0, h]
+        # gi: 对应anchor中心点的x坐标. 然后限制到0和宽. [0, w]
+
+        tbox.append(torch.cat((g_x_y - g_i_j, g_w_h), 1)) # ???什么玩应???
+        # 偏移量. gt相对于anchor的偏移量, 一个是float, 一个是int后的, 以及gt的w,h
+
+        anch.append(anchors[a]) # 对应的anchor的w, h.
 
 
+        tcls.append(c) # class
+        # 每个正样本对应的类别. 
 
+        if c.shape[0]: # 对于任何的target
+            assert c.max() < model.num_classes,       'Model accepts %g classes labeled from 0-%g, however you labelled a class %g. ' \
+            'See https://github.com/ultralytics/yolov3/wiki/Train-Custom-Data' % (model.nc, model.nc - 1, c.max())
 
-
-
-
-
-        break
+    # 返回
+    return tcls, tbox, indices, anch
     
-    # # iou of targets-anchors
-    # # targets中保存的是ground truth
-    # t, a = targets, []
-    # gwh = t[:, 4:6] * num_grid[0]
+    # # # iou of targets-anchors
+    # # # targets中保存的是ground truth
+    # # t, a = targets, []
+    # # gwh = t[:, 4:6] * num_grid[0]
 
-    if num_targets: # 如果存在ground true. 
-        # anchor_vec: shape = [3, 2] 代表3个anchor, w, h.
-        # gwh: shape = [n, 2] 代表 n个ground truth
-        # iou: shape = [3, n] 代表 3个anchor与对应的n个ground truth的iou
-        pass
+    # if num_targets: # 如果存在ground true. 
+    #     # anchor_vec: shape = [3, 2] 代表3个anchor, w, h.
+    #     # gwh: shape = [n, 2] 代表 n个ground truth
+    #     # iou: shape = [3, n] 代表 3个anchor与对应的n个ground truth的iou
+    #     pass
+
+
+
+
+
+
+
+def compute_loss(p, targets, model):
+    device = p[0].device # 获取设备。
+    lcls = torch.zeros(1, device=device)  # Tensor(0) # 分类损失
+    lbox = torch.zeros(1, device=device)  # Tensor(0) # 定位损失
+    lobj = torch.zeros(1, device=device)  # Tensor(0) # 置信度损失.
+
+
+
+
 
 
 def test_function_build_targets():
@@ -107,7 +143,7 @@ def test_function_build_targets():
 
     # out13, out26, out52 = yolo(x) 
     # print(out13.shape, out26.shape, out52.shape)
-    print(yolo.yololayer)
+    # print(yolo.yololayer) # 就是三个yololayer层。 
 
 
 

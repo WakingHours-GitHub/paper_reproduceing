@@ -3,7 +3,7 @@ import torch.functional as F
 from torch import nn
 import os
 import sys
-from yolo_dataset import *
+# from yolo_dataset import *
 
 os.chdir(sys.path[0])
 
@@ -184,14 +184,15 @@ class YoloHead(nn.Module):
 
 
 class YoLoBody(nn.Module):
-    def __init__(self, num_cclasses, num_anchor=3) -> None:
+    def __init__(self, num_classes, num_anchor=3) -> None:
         super().__init__()
+        self.num_classes = num_classes
         anchors = [[(10,13),  (16,30),  (33,23)],  [(30,61),  (62,45),  (59,119)],  [(116,90),  (156,198), (373,326)]]
         self.darknet = Darknet()
 
-        self.out_13 = YoloHead(1024, (num_cclasses+1+4)*num_anchor)
-        self.out_26 = YoloHead(512, (num_cclasses+1+4)*num_anchor)
-        self.out_52 = YoloHead(256, (num_cclasses+1+4)*num_anchor)
+        self.out_13 = YoloHead(1024, (self.num_classes+1+4)*num_anchor)
+        self.out_26 = YoloHead(512, (self.num_classes+1+4)*num_anchor)
+        self.out_52 = YoloHead(256, (self.num_classes+1+4)*num_anchor)
         self. yololayer = [
             YoLoLayer(anchors[-1], 20, 416, 32),
             YoLoLayer(anchors[-2], 20, 416, 16),
