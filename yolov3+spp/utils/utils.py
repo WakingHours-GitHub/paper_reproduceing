@@ -2,10 +2,17 @@ from torch import nn
 from utils import *
 from nets import *
 from yolo_dataset import  *
+import math
 
 import torch
+from torch import optim
+
 
 IOU_threshold = 0.2
+
+
+
+
 
 def wh_iou(wh1, wh2):
     # Returns the nxm IoU matrix. wh1 is nx2, wh2 is mx2
@@ -49,14 +56,14 @@ def build_targets(pred, targets, model):
         # 然后我们通过iou筛选正样本, 得到逻辑矩阵, 这样我们就知道哪个target对应哪个anchor了.
         
         # 准备拆分出来. 这里target要转换为相对于这个layer大小的绝对坐标. 
-        print(gain)
+        # print(gain)
         a, t = [], targets*gain # 
         if num_targets: # 如果存在target的话.
             j = wh_iou(anchors, t[:, 4:6]) > IOU_threshold # 返回逻辑矩阵. 
             
             # 然后通过这个逻辑矩阵, 分别找到对应的a, 以及对应的target, 同一索引(位置上)相对应, 也就是这个target对应的anchor模板.
             a,t = anthor_target[j], t.repeat(na, 1, 1)[j]
-            print(t)
+            # print(t)
 
         
         # 然后还需要知道target要对应到哪一个grid cell上. 知道位置, 
@@ -106,8 +113,55 @@ def build_targets(pred, targets, model):
 
 
 
+def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
+    # return positive, negative label smoothing BCE targets
+    return 1.0 - 0.5 * eps, 0.5 * eps
 
 
+def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False):
+    # Returns the IoU of box1 to box2. box1 is 4, box2 is nx4
+    box2 = box2.t()
+
+    # Get the coordinates of bounding boxes
+    if x1y1x2y2:  # x1, y1, x2, y2 = box1
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1[0], box1[1], box1[2], box1[3]
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2[0], box2[1], box2[2], box2[3]
+    else:  # transform from xywh to xyxy
+        b1_x1, b1_x2 = box1[0] - box1[2] / 2, box1[0] + box1[2] / 2
+        b1_y1, b1_y2 = box1[1] - box1[3] / 2, box1[1] + box1[3] / 2
+        b2_x1, b2_x2 = box2[0] - box2[2] / 2, box2[0] + box2[2] / 2
+        b2_y1, b2_y2 = box2[1] - box2[3] / 2, box2[1] + box2[3] / 2
+
+    # Intersection area
+    inter = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
+            (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
+
+    # Union Area
+    w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1
+    w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1
+    union = (w1 * h1 + 1e-16) + w2 * h2 - inter
+
+    iou = inter / union  # iou
+    if GIoU or DIoU or CIoU:
+        cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)  # convex (smallest enclosing box) width
+        ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)  # convex height
+        if GIoU:  # Generalized IoU https://arxiv.org/pdf/1902.09630.pdf
+            c_area = cw * ch + 1e-16  # convex area
+            return iou - (c_area - union) / c_area  # GIoU
+        if DIoU or CIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+            # convex diagonal squared
+            c2 = cw ** 2 + ch ** 2 + 1e-16
+            # centerpoint distance squared
+            rho2 = ((b2_x1 + b2_x2) - (b1_x1 + b1_x2)) ** 2 / 4 + ((b2_y1 + b2_y2) - (b1_y1 + b1_y2)) ** 2 / 4
+            if DIoU:
+                return iou - rho2 / c2  # DIoU
+            elif CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
+                v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / h2) - torch.atan(w1 / h1), 2)
+                with torch.no_grad():
+                    alpha = v / (1 - iou + v)
+                return iou - (rho2 / c2 + v * alpha)  # CIoU
+
+    return iou
 
 def compute_loss(p, targets, model):
     device = p[0].device # 获取设备。
@@ -115,7 +169,93 @@ def compute_loss(p, targets, model):
     lbox = torch.zeros(1, device=device)  # Tensor(0) # 定位损失
     lobj = torch.zeros(1, device=device)  # Tensor(0) # 置信度损失.
 
+    # 通过build_target计算所有正样本, 然后将结果保存过来
+    tcls, tbox, indices, anchors = build_targets(p, targets, model)  # targets  # 计算所有的正样本.
+    # h = model.hyp  # hyperparameters
+    red = 'mean'  # Loss reduction (sum or mean)
 
+    BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.0], device=device), reduction=red) # 针对分类损失. 
+    BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.0], device=device), reduction=red) # obj损失. 
+    
+    cp, cn = smooth_BCE(eps=0.0) # 平滑,  1.0, 0.
+
+    # per output
+    for i, pi in enumerate(p):  # layer index, layer predictions # 遍历每一层的输出. 
+        b, a, gj, gi = indices[i]  # image_idx, anchor_idx, grid_y, grid_x
+        tobj = torch.zeros_like(pi[..., 0], device=device)  # target obj
+
+        nb = b.shape[0]  # number of positive samples
+        if nb:
+            # 对应匹配到正样本的预测信息
+            ps = pi[b, a, gj, gi]  # prediction subset corresponding to targets
+
+            # GIoU
+            pxy = ps[:, :2].sigmoid()
+            pwh = ps[:, 2:4].exp().clamp(max=1E3) * anchors[i]
+            pbox = torch.cat((pxy, pwh), 1)  # predicted box
+            giou = bbox_iou(pbox.t(), tbox[i], x1y1x2y2=False, GIoU=True)  # giou(prediction, target)
+            lbox += (1.0 - giou).mean()  # giou loss
+
+            # Obj
+            tobj[b, a, gj, gi] = (1.0 - 1.0) + 1.0 * giou.detach().clamp(0).type(tobj.dtype)  # giou ratio
+
+            # Class
+            if model.num_classes > 1:  # cls loss (only if multiple classes)
+                t = torch.full_like(ps[:, 5:], cn, device=device)  # targets
+                t[range(nb), tcls[i]] = cp
+                lcls += BCEcls(ps[:, 5:], t)  # BCE
+
+            # Append targets to text file
+            # with open('targets.txt', 'a') as file:
+            #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
+
+        lobj += BCEobj(pi[..., 4], tobj)  # obj loss
+
+    lbox *= 3.54 # h['giou']
+    lobj *= 64.3  # h['obj']
+    lcls *= 37.4 #  h['cls']
+
+    # loss = lbox + lobj + lcls
+    return {"box_loss": lbox,
+            "obj_loss": lobj,
+            "class_loss": lcls}
+
+
+
+def test_train():
+    Epoch = 100
+    device = torch.device("cuda:0")
+
+    yolo_dataset = Yolo_VOC_dataset()
+    yolo_dataloader = DataLoader(
+        yolo_dataset,
+        8,
+        collate_fn=Yolo_VOC_dataset.collate_fn,
+        drop_last=True
+    )
+
+    net = YoLoBody(20).to(device)
+
+    trainer = optim.SGD(net.parameters(), 0.001, 0.937, weight_decay=0.0005)
+
+    for epoch in range(Epoch):
+        for i, (imgs, targets, shapes, indexs) in enumerate(yolo_dataloader):
+
+            trainer.zero_grad()
+            imgs, targets = imgs.to(device), targets.to(device)
+
+            pred = net(imgs)
+            loss_dict = compute_loss(pred, targets, net) # 计算损失.
+            # 传入pred, labels, 以及模型.
+            losses = sum(loss for loss in loss_dict.values())
+            
+            losses.backward()
+
+            trainer.step()
+            print(i, losses)
+
+        if (epoch+1) % 10 == 0:
+            torch.save(net.state_dict(), f"../runs/{epoch+1}_loss_{int(losses.item())}.pth")
 
 
 
@@ -166,7 +306,8 @@ def xywh2xyxy(x):
 
 
 if __name__ == "__main__":
-    test_function_build_targets()
+    # test_function_build_targets()
+    test_train()
 
 
 

@@ -106,18 +106,20 @@ class Yolo_VOC_dataset(Dataset):
             cv_img, (h0, w0), (h, w) = self.load_image(index) # 原来的尺寸, 以及形变之后的尺寸
             # print((h0, w0), (h, w))  # (400, 225) (416, 234) # 这就是经过load之后的图片。
             
-            
-            label = np.hstack([np.array([xml_dict["object"]]).T, xml_dict["bbox"]]).astype(np.float32)
+            try:
+                label = np.hstack([np.array([xml_dict["object"]]).T, xml_dict["bbox"]]).astype(np.float32)
+            except:
+                # label = np.array()
+                print(np.array([xml_dict["object"]]).T, xml_dict["bbox"])
             
             # 对label进行处理: 转换为相对坐标. 
             # xmin, ymin, xmax, ymax -> x, y, w, h, # 相对坐标.
-            print("xyxy", label)
+            # print("xyxy", label)
 
             if label.ndim > 0:
-
                 label[:, 3] = label[:, 3] - label[:, 1] # w
                 label[:, 4] = label[:, 4] - label[:, 2] # h
-                print("xywh", label)
+                # print("xywh", label)
 
 
                 label[:, 1] = ((label[:, 1]+label[:, 3]/2.0)/float(w0)).astype(np.float32)
@@ -126,7 +128,7 @@ class Yolo_VOC_dataset(Dataset):
                 label[:, 4] = (label[:, 4]/float(h0)).astype(np.float32)
 
 
-            print(label)
+            # print(label)
 
 
 
@@ -213,6 +215,9 @@ def parse_xml(str_xml: str) -> dict:
     result_dict["object"] = e.xpath("//object/name/text()")
     bboxs = [int(ele) for ele in e.xpath("//object/bndbox/*/text()")]
     result_dict["bbox"] = np.ascontiguousarray(np.array([bboxs[bbox: bbox+4] for bbox in range(0, len(bboxs), 4)]))
+    if len(result_dict["bbox"]) == 0:
+        result_dict["bbox"] = np.array([result_dict["bbox"]]).copy()
+
     
     result_dict["shape"] = [int(ele) for ele in e.xpath("//size/*[position()<3]/text()")]
     result_dict["path"] = join(os.getcwd(), "../VOCdevkit/VOC2007/JPEGImages", result_dict["filename"]+".jpg")
@@ -370,6 +375,7 @@ def test_draw():
 
 
 if __name__ == "__main__":
+    test_parse_xml()
     test_parse_xml()
     test_dataset()
     # test_dataloader()
