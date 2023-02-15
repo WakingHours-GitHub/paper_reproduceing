@@ -6,6 +6,7 @@ import math
 
 import torch
 from torch import optim
+import time
 
 
 IOU_threshold = 0.2
@@ -222,6 +223,52 @@ def compute_loss(p, targets, model):
 
 
 
+def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False):
+    # Returns the IoU of box1 to box2. box1 is 4, box2 is nx4
+    box2 = box2.t()
+
+    # Get the coordinates of bounding boxes
+    if x1y1x2y2:  # x1, y1, x2, y2 = box1
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1[0], box1[1], box1[2], box1[3]
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2[0], box2[1], box2[2], box2[3]
+    else:  # transform from xywh to xyxy
+        b1_x1, b1_x2 = box1[0] - box1[2] / 2, box1[0] + box1[2] / 2
+        b1_y1, b1_y2 = box1[1] - box1[3] / 2, box1[1] + box1[3] / 2
+        b2_x1, b2_x2 = box2[0] - box2[2] / 2, box2[0] + box2[2] / 2
+        b2_y1, b2_y2 = box2[1] - box2[3] / 2, box2[1] + box2[3] / 2
+
+    # Intersection area
+    inter = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
+            (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
+
+    # Union Area
+    w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1
+    w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1
+    union = (w1 * h1 + 1e-16) + w2 * h2 - inter
+
+    iou = inter / union  # iou
+    if GIoU or DIoU or CIoU:
+        cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)  # convex (smallest enclosing box) width
+        ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)  # convex height
+        if GIoU:  # Generalized IoU https://arxiv.org/pdf/1902.09630.pdf
+            c_area = cw * ch + 1e-16  # convex area
+            return iou - (c_area - union) / c_area  # GIoU
+        if DIoU or CIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+            # convex diagonal squared
+            c2 = cw ** 2 + ch ** 2 + 1e-16
+            # centerpoint distance squared
+            rho2 = ((b2_x1 + b2_x2) - (b1_x1 + b1_x2)) ** 2 / 4 + ((b2_y1 + b2_y2) - (b1_y1 + b1_y2)) ** 2 / 4
+            if DIoU:
+                return iou - rho2 / c2  # DIoU
+            elif CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
+                v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / h2) - torch.atan(w1 / h1), 2)
+                with torch.no_grad():
+                    alpha = v / (1 - iou + v)
+                return iou - (rho2 / c2 + v * alpha)  # CIoU
+
+    return iou
+
+
 def test_train():
     Epoch = 100
     device = torch.device("cuda:0")
@@ -229,7 +276,7 @@ def test_train():
     yolo_dataset = Yolo_VOC_dataset()
     yolo_dataloader = DataLoader(
         yolo_dataset,
-        8,
+        10,
         collate_fn=Yolo_VOC_dataset.collate_fn,
         drop_last=True
     )
@@ -257,6 +304,105 @@ def test_train():
         if (epoch+1) % 10 == 0:
             torch.save(net.state_dict(), f"../runs/{epoch+1}_loss_{int(losses.item())}.pth")
 
+def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6,
+                        multi_label=True, classes=None, agnostic=False, max_num=100):
+    """
+    Performs  Non-Maximum Suppression on inference results
+
+    param: prediction[batch, num_anchors, (num_classes+1+4) x num_anchors]
+    Returns detections with shape:
+        nx6 (x1, y1, x2, y2, conf, cls)
+    """
+
+    # Settings
+    merge = False  # merge for best mAP
+    min_wh, max_wh = 2, 4096  # (pixels) minimum and maximum box width and height
+    time_limit = 10.0  # seconds to quit after
+
+    t = time.time()
+    nc = prediction[0].shape[1] - 5  # number of classes
+    multi_label &= nc > 1  # multiple labels per box
+    output = [None] * prediction.shape[0]
+    for xi, x in enumerate(prediction):  # image index, image inference 遍历每张图片
+        # Apply constraints
+        x = x[x[:, 4] > conf_thres]  # confidence 根据obj confidence虑除背景目标
+        x = x[((x[:, 2:4] > min_wh) & (x[:, 2:4] < max_wh)).all(1)]  # width-height 虑除小目标
+
+        # If none remain process next image
+        if not x.shape[0]:
+            continue
+
+        # Compute conf
+        x[..., 5:] *= x[..., 4:5]  # conf = obj_conf * cls_conf
+
+        # Box (center x, center y, width, height) to (x1, y1, x2, y2)
+        box = xywh2xyxy(x[:, :4])
+
+        # Detections matrix nx6 (xyxy, conf, cls)
+        if multi_label:  # 针对每个类别执行非极大值抑制
+            i, j = (x[:, 5:] > conf_thres).nonzero(as_tuple=False).t()
+            x = torch.cat((box[i], x[i, j + 5].unsqueeze(1), j.float().unsqueeze(1)), 1)
+        else:  # best class only  直接针对每个类别中概率最大的类别进行非极大值抑制处理
+            conf, j = x[:, 5:].max(1)
+            x = torch.cat((box, conf.unsqueeze(1), j.float().unsqueeze(1)), 1)[conf > conf_thres]
+
+        # Filter by class
+        if classes:
+            x = x[(j.view(-1, 1) == torch.tensor(classes, device=j.device)).any(1)]
+
+        # Apply finite constraint
+        # if not torch.isfinite(x).all():
+        #     x = x[torch.isfinite(x).all(1)]
+
+        # If none remain process next image
+        n = x.shape[0]  # number of boxes
+        if not n:
+            continue
+
+        # Sort by confidence
+        # x = x[x[:, 4].argsort(descending=True)]
+
+        # Batched NMS
+        c = x[:, 5] * 0 if agnostic else x[:, 5]  # classes
+        boxes, scores = x[:, :4].clone() + c.view(-1, 1) * max_wh, x[:, 4]  # boxes (offset by class), scores
+        i = torchvision.ops.nms(boxes, scores, iou_thres)
+        i = i[:max_num]  # 最多只保留前max_num个目标信息
+        if merge and (1 < n < 3E3):  # Merge NMS (boxes merged using weighted mean)
+            try:  # update boxes as boxes(i,4) = weights(i,n) * boxes(n,4)
+                iou = box_iou(boxes[i], boxes) > iou_thres  # iou matrix
+                weights = iou * scores[None]  # box weights
+                x[i, :4] = torch.mm(weights, x[:, :4]).float() / weights.sum(1, keepdim=True)  # merged boxes
+                # i = i[iou.sum(1) > 1]  # require redundancy
+            except:  # possible CUDA error https://github.com/ultralytics/yolov3/issues/1139
+                print(x, i, x.shape, i.shape)
+                pass
+
+        output[xi] = x[i]
+        if (time.time() - t) > time_limit:
+            break  # time limit exceeded
+
+    return output
+def decode(pred, net):
+    pred = non_max_suppression(pred)
+
+
+
+def test_prediction():
+    device = torch.device("cuda:0")
+
+    yolo_dataset = Yolo_VOC_dataset()
+    image, target, shape, index = yolo_dataset[-203]
+    image = torch.unsqueeze(image, 0).float().to(device)
+    print(image.shape)
+    
+    net = YoLoBody(20).to(device)
+    net.load_state_dict(torch.load("../runs/30_loss_16.pth"))
+    net.eval()
+    with torch.no_grad():
+        pred = net(image) # ???????为什么要【0】
+        print("pred.shape", pred[0].shape)
+
+        # decode(pred, net)
 
 
 
@@ -307,7 +453,8 @@ def xywh2xyxy(x):
 
 if __name__ == "__main__":
     # test_function_build_targets()
-    test_train()
+    # test_train()
+    test_prediction()
 
 
 
